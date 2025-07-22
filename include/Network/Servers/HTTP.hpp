@@ -984,6 +984,16 @@ namespace Network::Servers::HTTP
             } else this->template setHeader<Headers::ContentType>(MIMEType::Invalid);
         }
 
+        FileAnswer(const ROString & path, const ROString & content) : FileAnswer::ClientAnswer(Code::NotFound), stream(content)
+        {
+            // Check if the file is found
+            if (stream.hasContent())
+            {
+                this->setCode(Code::Ok);
+                // Then find out the extension for the file in order to deduce the MIME type to use
+                this->template setHeader<Headers::ContentType>(getMIMEFromExtension(path.fromLast(".")));
+            } else this->template setHeader<Headers::ContentType>(MIMEType::Invalid);
+        }        
         InputStream stream;
     };
 

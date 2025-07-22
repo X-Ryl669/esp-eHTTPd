@@ -171,7 +171,7 @@ namespace Streams
     struct MemoryView : public Input<MemoryView>
     {
         std::size_t getSize() const             { return (std::size_t)buffer.getLength(); }
-        bool hasContent() const                { return getSize() > 0; }
+        bool hasContent() const                 { return getSize() > 0; }
         std::size_t getPos() const              { return pos; }
         bool setPos(const std::size_t pos)      { return pos <= getSize() ? this->pos = pos, true : false; }
 
