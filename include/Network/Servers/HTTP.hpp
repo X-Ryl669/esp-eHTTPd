@@ -21,7 +21,7 @@
 #include <cstddef>
 
 #ifndef ClientBufferSize
-  #define ClientBufferSize 512
+  #define ClientBufferSize 1024
 #endif
 
 
@@ -32,7 +32,7 @@
 
 namespace Network::Servers::HTTP
 {
-#ifdef UseTLSServer
+#if UseTLSServer == 1
     typedef MBTLSSocket Socket;
 #else
     typedef BaseSocket Socket;

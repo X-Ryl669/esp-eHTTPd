@@ -1,7 +1,8 @@
 #ifndef hpp_HTTP_Codes_hpp
 #define hpp_HTTP_Codes_hpp
 
-
+// We need our configuration
+#include "HTTPDConfig.hpp"
 // We need reflection code for enum to string conversion
 #include "Reflection/AutoEnum.hpp"
 // We need a string-view like class for avoiding useless copy here

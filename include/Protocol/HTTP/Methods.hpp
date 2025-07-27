@@ -1,6 +1,8 @@
 #ifndef hpp_HTTP_Methods_hpp
 #define hpp_HTTP_Methods_hpp
 
+// We need our configuration
+#include "HTTPDConfig.hpp"
 // We need reflection code for enum to string conversion
 #include "Reflection/AutoEnum.hpp"
 // We need a string-view like class for avoiding useless copy here
@@ -15,7 +17,6 @@
 #define IF_1(true_case, false_case) true_case,
 #define IF(condition, true_case, false_case) CONCAT2_DEFERRED(IF_, condition)(true_case, false_case)
 
-#define MaxSupport 1
 
 namespace Protocol::HTTP
 {

@@ -1,6 +1,8 @@
 #ifndef hpp_RequestLine_hpp
 #define hpp_RequestLine_hpp
 
+// We need our configuration
+#include "HTTPDConfig.hpp"
 // We need header map, ParsingError and persistence interface
 #include "HeaderMap.hpp"
 // We need concepts too

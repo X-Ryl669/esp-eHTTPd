@@ -1,6 +1,9 @@
 #ifndef hpp_Socket_hpp
 #define hpp_Socket_hpp
 
+// We need our configuration
+#include "HTTPDConfig.hpp"
+
 // We need basic errors
 #include "InternalErrors.hpp"
 
