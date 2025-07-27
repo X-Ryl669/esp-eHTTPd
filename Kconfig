@@ -1,0 +1,37 @@
+menu "esp-eHTTPd"
+
+    config ESP_EHTTPD_ENABLED
+        bool "Enable the eHTTPd component"
+        default y
+        help
+            This enables the eHTTPd component.
+
+    config ESP_EHTTPD_CLIENT_BUFFER_SIZE
+        int "The buffer size for each client"
+        depends on ESP_EHTTPD_ENABLED
+        default 1024
+        help
+            The transcient-vault buffer size (must be a power of 2) per client.
+
+    config ESP_EHTTPD_TLS_ENABLE
+        bool "Enable TLS server"
+        depends on ESP_EHTTPD_ENABLED
+        default n
+        help
+        You can activate TLS but it burns space in memory and flash.
+
+    config ESP_EHTTPD_MAX_SUPPORT
+        bool "Enable max compatibility support for HTTP standard"
+        depends on ESP_EHTTPD_ENABLED
+        default n
+        help
+            Enable maximum compatibility with RFC standard for HTTP. This increases binary size.
+
+    config ESP_EHTTPD_FORCEINCLUDE
+        string "Path to include file to be used before any other. Default to empty file"
+        depends on ESP_EHTTPD_ENABLED
+        default "empty.hpp"
+        help
+            If you need to adapt your logging library with eHTTPd's expectation, you can do it here.
+
+endmenu
