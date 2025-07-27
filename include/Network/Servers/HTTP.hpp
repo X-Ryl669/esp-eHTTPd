@@ -44,7 +44,7 @@ namespace Network::Servers::HTTP
     static constexpr const char EntityTooLargeAnswer[] = "HTTP/1.1 413 Entity too large\r\n\r\n";
     static constexpr const char InternalServerErrorAnswer[] = "HTTP/1.1 500 Internal server error\r\n\r\n";
     static constexpr const char NotFoundAnswer[] = "HTTP/1.1 404 Not found\r\n\r\n";
-    static constexpr const char ChunkedEncoding[] = "Transfer-Encoding:chunked\r\n";
+    static constexpr const char ChunkedEncoding[] = "Transfer-Encoding:chunked\r\n\r\n";
     static constexpr const char ConnectionClose[] = "Connection:close\r\n";
 
     using namespace Protocol::HTTP;
@@ -286,7 +286,7 @@ namespace Network::Servers::HTTP
                     header.setValue(std::forward(v));
                     return true;
                 }
-            } 
+            }
             return false;
         }
 
@@ -993,7 +993,7 @@ namespace Network::Servers::HTTP
                 // Then find out the extension for the file in order to deduce the MIME type to use
                 this->template setHeader<Headers::ContentType>(getMIMEFromExtension(path.fromLast(".")));
             } else this->template setHeader<Headers::ContentType>(MIMEType::Invalid);
-        }        
+        }
         InputStream stream;
     };
 

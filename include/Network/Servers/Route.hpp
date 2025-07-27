@@ -38,7 +38,6 @@ namespace Network::Servers::HTTP
         >>{}); // Who said we can't feed brainfuck to C++ compiler?
     };
 
-
 #ifndef SLog
     // If no log function defined, let's define a no-op stub here
     template <typename ... Args>
@@ -177,6 +176,28 @@ namespace Network::Servers::HTTP
         }
     };
 
+    template <RouteCallback auto CallbackCRTP, unsigned routeHash>
+    struct SubRoute { static constexpr unsigned hash = routeHash; static constexpr auto cb = CallbackCRTP; };
+
+    template <auto /*SubRoute<RouteCallback auto cb, unsigned>*/ ... routes>
+    struct MultiRoute
+    {
+        static bool accept(Client & client) {
+            unsigned hash = CompileTime::constHash(client.reqLine.URI.absolutePath.getData(), client.reqLine.URI.absolutePath.getLength());
+            return [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
+                return ((routes.hash == hash) || ...);
+            }(std::make_index_sequence<sizeof...(routes)>{});
+        }
+
+        template <typename H>
+        bool operator()(Client & client, const H & headers) const {
+            unsigned hash = CompileTime::constHash(client.reqLine.URI.absolutePath.getData(), client.reqLine.URI.absolutePath.getLength());
+            return [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
+                return ((routes.hash == hash ? routes.cb(client, headers) : false) || ...);
+            }(std::make_index_sequence<sizeof...(routes)>{});
+        }
+    };
+
     template <RouteCallback auto CallbackCRTP, typename H>
     static ClientState routeParse(Client & client)
     {
@@ -221,6 +242,17 @@ namespace Network::Servers::HTTP
 
         /** Once a route is accepted for a client, let's compute the list of headers and parse them all */
         static ClientState parse(Client & client) { return routeParse<CallbackCRTP, ExpectedHeaderArray>(client); }
+    };
+
+    template <MethodsMask methods, MultiRoute route, Headers ... allowedHeaders>
+    struct SimilarRoutes final : public RouteHelper
+    {
+        typedef MakeHeadersArray<methods, allowedHeaders...>::Type ExpectedHeaderArray;
+        /** Early and fast check to see if the current request by the client is worth continuing parsing the headers */
+        static bool accept(Client & client) { return RouteHelper::accept(client, methods.mask) && route.accept(client); }
+
+        /** Once a route is accepted for a client, let's compute the list of headers and parse them all */
+        static ClientState parse(Client & client) { return routeParse<route, ExpectedHeaderArray>(client); }
     };
 
     /** The default route */
