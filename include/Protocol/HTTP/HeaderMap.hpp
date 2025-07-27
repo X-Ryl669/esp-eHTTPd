@@ -235,12 +235,12 @@ namespace Protocol::HTTP
             static constexpr std::size_t getDataSize() { return sizeof(value) + sizeof(attributes); }
         };
 
-        template <typename E, size_t _N, bool strict = false>
-        struct ValueList : public ValueBase, public PersistBase<ValueList<E, _N, strict>>
+        template <typename E, size_t NElems, bool strict = false>
+        struct ValueList : public ValueBase, public PersistBase<ValueList<E, NElems, strict>>
         {
-            E    value[_N];
+            E    value[NElems];
             uint8 count = 0; // Use a uint8 to avoid a dangling pointer in getDataPtr
-            static constexpr uint8 N = (uint8)_N;
+            static constexpr uint8 N = (uint8)NElems;
             virtual ParsingError parseFrom(ROString & val) {
                 ParsingError err;
                 for(count = 0; count < N;) {
@@ -288,7 +288,7 @@ namespace Protocol::HTTP
             template <typename ... U>
             requires ((std::is_same_v<std::decay_t<U>, typename E::ValueType> && ...))
             void setValue(U && ... values) {
-                static_assert(sizeof...(values) <= _N && "The given parameter list is larger than the array");
+                static_assert(sizeof...(values) <= NElems && "The given parameter list is larger than the array");
                 [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
                     return ((value[Is].setValue(std::forward<U>(values)), true) && ...);
                 }(std::make_index_sequence<sizeof...(values)>{});
@@ -304,7 +304,7 @@ namespace Protocol::HTTP
 
             void setValue(std::initializer_list<typename E::ValueType> && il) {
                 auto e = il.begin();
-                for (std::size_t i = 0; i < std::min(il.size(), _N); i++) {
+                for (std::size_t i = 0; i < std::min(il.size(), NElems); i++) {
                     value[i].setValue(*e);
                     ++e;
                     count = (uint8)(i+1);

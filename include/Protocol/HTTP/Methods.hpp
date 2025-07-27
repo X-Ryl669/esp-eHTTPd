@@ -123,6 +123,7 @@ namespace Protocol::HTTP
         UserAgent,
         IF(MaxSupport, Via, )
         WWWAuthenticate,
+        IF(MaxSupport, XClientDate, )
         IF(MaxSupport, XForwardedFor, )
     };
 
@@ -164,6 +165,7 @@ namespace Protocol::HTTP
         Upgrade = (int8)Headers::Upgrade,
         UserAgent = (int8)Headers::UserAgent,
         IF(MaxSupport, Via = (int8)Headers::Via, )
+        IF(MaxSupport, XClientDate, )
         IF(MaxSupport, XForwardedFor = (int8)Headers::XForwardedFor, )
     };
 
@@ -435,7 +437,7 @@ namespace Protocol::HTTP
     /////////////////////////////////////////////////////////////////////////////////////////////////////
 
     /** Accept-Charset header values. This MUST be sorted (except for Invalid and all) */
-    enum class Charset : char
+    enum class Charset : int8
     {
         Invalid      = -1,
         ISO_8859_1,
@@ -481,7 +483,7 @@ namespace Protocol::HTTP
     /////////////////////////////////////////////////////////////////////////////////////////////////////
 
     /** Accept-Encoding / Content-Encoding headers. This MUST be sorted (except for Invalid and all) */
-    enum class Encoding : char
+    enum class Encoding : int8
     {
         Invalid = -1,
         all,

@@ -1,5 +1,5 @@
-#ifndef hpp_CPP_HTTPServer_CPP_hpp
-#define hpp_CPP_HTTPServer_CPP_hpp
+#ifndef hpp_Server_HTTP_hpp
+#define hpp_Server_HTTP_hpp
 
 
 // We need HTTP parsers here
@@ -64,8 +64,6 @@ namespace Network::Servers::HTTP
         // This works when they are all the same type
         template<typename Result, typename... Ts>
         Result& runtime_get(std::size_t i, std::tuple<Ts...>& t)  {
-            using Tuple = std::tuple<Ts...>;
-
             return [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
                 return std::array<std::reference_wrapper<Result>, sizeof...(Ts)>{ (Result&)std::get<Is>(t)... }[i];
             }(std::index_sequence_for<Ts...>());
@@ -256,6 +254,9 @@ namespace Network::Servers::HTTP
             constexpr std::size_t pos = findHeaderPos(h);
             if constexpr (pos == headerArray.size())
             {   // If the compiler stops here, you're querying a header that doesn't exist...
+                // The error is probably that you forgot to add this header in the route, or you're using the same
+                // callback for a POST and GET method (the former adds ContentLength automatically, but the latter doesn't)
+                // In that case, either add the missing header or split in 2 routes for each method
                 throw "Invalid header given for this type, it doesn't contain any";
 //                    static RequestHeader<h> invalid;
 //                    return invalid;
@@ -497,7 +498,7 @@ namespace Network::Servers::HTTP
                 {
                     if (!sendSize(answerLength))
                     {
-                        SLog(Level::Info, "Client %s [%.*s](%u): 523%s", socket.address, reqLine.URI.absolutePath.getLength(), URI, answerLength, close ? " closed" : "");
+                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 523, close ? " closed" : "");
                         return false;
                     }
 
@@ -519,14 +520,14 @@ namespace Network::Servers::HTTP
 
                     if (!clientAnswer.sendContent(*this, answerLength))
                     {
-                        SLog(Level::Info, "Client %s [%.*s](%u): 524%s", socket.address, reqLine.URI.absolutePath.getLength(), URI, 0, close ? " closed" : "");
+                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, 0U, 524, close ? " closed" : "");
                         return false;
                     }
                 } else if (!stream.hasContent())
                 {
                     if (!sendSize(0))
                     {
-                        SLog(Level::Info, "Client %s [%.*s](%u): 525%s", socket.address, reqLine.URI.absolutePath.getLength(), URI, answerLength, close ? " closed" : "");
+                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, close ? " closed" : "");
                         return false;
                     }
                 }
@@ -534,12 +535,12 @@ namespace Network::Servers::HTTP
             {
                 if (!sendSize(0))
                 {
-                    SLog(Level::Info, "Client %s [%.*s](%u): 525%s", socket.address, reqLine.URI.absolutePath.getLength(), URI, answerLength, close ? " closed" : "");
+                    SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, close ? " closed" : "");
                     return false;
                 }
             }
 
-            SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, reqLine.URI.absolutePath.getLength(), URI, answerLength, (int)clientAnswer.getCode(), close ? " closed" : "");
+            SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, (int)clientAnswer.getCode(), close ? " closed" : "");
             parsingStatus = ReqDone;
             if (close) reset();
             return true;
@@ -667,7 +668,8 @@ namespace Network::Servers::HTTP
             case Invalid:
             {   // Check if we had a complete request line
                 parsingStatus = ReqLine;
-            } // Intentionally no break here
+            }
+            [[fallthrough]];
             case ReqLine:
             {
                 if (buffer.Find("\r\n") != buffer.getLength())
@@ -692,7 +694,7 @@ namespace Network::Servers::HTTP
                     return recvBuffer.freeSize() ? true : closeWithError(Code::EntityTooLarge);
                 }
             }
-            // Intentionally no break here
+            [[fallthrough]];
             case RecvHeaders:
             case NeedRefillHeaders:
                 if (buffer.Find(EOM) != buffer.getLength() || buffer == "\r\n") // No header here is valid too
@@ -806,62 +808,6 @@ namespace Network::Servers::HTTP
         CodeAnswer(Code code) : CodeAnswer::ClientAnswer(code) {}
     };
 
-
-    /** A JSON escaping dynamic function wrapper. This is used to escape strings so they can respect the JSON format */
-    static size_t computeJSONStringRequiredSize(const ROString & input)
-    {
-        // First pass, count the number of required output char
-        size_t count = 0; const char * p = input.getData();
-        for (size_t i = 0; i < input.getLength(); i++) {
-            switch (p[i]) {
-            case '"': count += 2; break;
-            case '\\': count += 2; break;
-            case '\b': count += 2; break;
-            case '\f': count += 2; break;
-            case '\n': count += 2; break;
-            case '\r': count += 2; break;
-            case '\t': count += 2; break;
-            default:
-                if ((uint8)p[i] <= '\x1f') {
-                    count += 6;
-                } else {
-                    count++;
-                }
-            }
-        }
-        return count;
-    }
-
-    static RWString escapeJSONString(const ROString & input)
-    {
-        size_t count = computeJSONStringRequiredSize(input);
-        RWString ret(0, count);
-        char * o = (char*)ret.getData();
-        static char hexDigits[] = "0123456789abcdef";
-        const char * p = input.getData();
-        for (size_t i = 0; i < input.getLength(); i++) {
-            switch (p[i]) {
-            case '"': *o++ = '\\'; *o++ = '"';   break;
-            case '\\': *o++ = '\\'; *o++ = '\\'; break;
-            case '\b': *o++ = '\\'; *o++ = 'b'; break;
-            case '\f': *o++ = '\\'; *o++ = 'f'; break;
-            case '\n': *o++ = '\\'; *o++ = 'n'; break;
-            case '\r': *o++ = '\\'; *o++ = 'r'; break;
-            case '\t': *o++ = '\\'; *o++ = 't'; break;
-            default:
-                if ((uint8)p[i] <= '\x1f') {
-                    *o++ = '\\'; *o++ = 'u'; *o++ = '0'; *o++ = '0';
-                    *o++ = hexDigits[p[i] >> 4]; *o++ = hexDigits[p[i] & 0xF];
-                } else {
-                    *o++ = p[i];
-                }
-            }
-        }
-        *o = 0;
-        return ret;
-    }
-
-
     /** The get a chunk function that should follow this signature:
         @code
             ROString callback()
@@ -916,12 +862,12 @@ namespace Network::Servers::HTTP
         bool sendContent(Client & client, std::size_t & totalSize) {
             Streams::ChunkedOutput o{client.socket};
             totalSize = 0;
-            ROString s = std::move(callbackFunc());
+            ROString s = callbackFunc();
             while (s)
             {
                 if (o.write(s.getData(), s.getLength()) != s.getLength()) return false;
                 totalSize += (std::size_t)s.getLength();
-                s = std::move(callbackFunc());
+                s = callbackFunc();
             }
             // Need to finish sending the flux
             o.write(nullptr, 0);
@@ -937,10 +883,10 @@ namespace Network::Servers::HTTP
         bool sendHeaders(Client & client) { return headers.sendHeaders(client); }
         operator HS & () { return headers; }
 
-        /** The lambda function we've captured */
-        T callbackFunc;
         /** Aggregate header type */
         HS headers;
+        /** The lambda function we've captured */
+        T callbackFunc;
     };
     /** Add a deducing guide for the lambda function */
     template<typename T, typename V>

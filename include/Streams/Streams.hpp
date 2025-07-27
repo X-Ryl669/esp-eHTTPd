@@ -229,8 +229,8 @@ namespace Streams
     struct Socket final : public Input<Socket>, public Output<Socket>, public Private::NonSeekable, public Private::NonMappeable, public Private::WithContent
     {
         std::size_t getSize() const             { return 0; }
-        std::size_t read(void * buf, const std::size_t size) { return socket->recv((char*)buf, (const uint32)size).getCount(); }
-        std::size_t write(const void * buf, const std::size_t size) { return socket->send((const char*)buf, (const uint32)size).getCount(); }
+        std::size_t read(void * buf, const std::size_t size) { return socket->recv((char*)buf, (uint32)size).getCount(); }
+        std::size_t write(const void * buf, const std::size_t size) { return socket->send((const char*)buf, (uint32)size).getCount(); }
         Socket(Network::BaseSocket & socket) : socket(&socket) {}
     protected:
         Network::BaseSocket * socket;
