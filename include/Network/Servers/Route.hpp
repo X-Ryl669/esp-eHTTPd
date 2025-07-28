@@ -3,6 +3,7 @@
 
 // We need Client declaration
 #include "HTTP.hpp"
+#include "Tools/FuncRef.hpp"
 
 // We need offsetof for making the container_of macro
 #include <cstddef>
@@ -65,8 +66,7 @@ namespace Network::Servers::HTTP
         static bool accept(Client & client, uint32 methodsMask) { return ((1<<(uint32)client.reqLine.method) & methodsMask); }
 
         /** A generic header parser that's using the given lambda function for the specialized stuff (this limits the binary size) */
-        template <typename Func>
-        static ClientState parse(Client & client, Func && f)
+        static ClientState parse(Client & client, Tools::function_ref<Headers(const ROString & header, RequestHeaderBase *& reqHdr)> f)
         {
             // Parse the headers as much as we can
             ROString input = client.recvBuffer.getView<ROString>(), header;
@@ -111,8 +111,7 @@ namespace Network::Servers::HTTP
         }
 
         /** A generic header parser that's using the given lambda function for the specialized stuff (this limits the binary size) */
-        template <typename Func>
-        static ClientState parsePersist(Client & client, Func && f)
+        static ClientState parsePersist(Client & client, Tools::function_ref<Headers(const ROString & header, RequestHeaderBase *& reqHdr)> f)
         {
             // Parse the headers as much as we can
             ROString input = client.recvBuffer.getView<ROString>(), header;
