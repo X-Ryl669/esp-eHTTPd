@@ -4,6 +4,11 @@
 // We need Client declaration
 #include "HTTP.hpp"
 
+// We need offsetof for making the container_of macro
+#include <cstddef>
+
+#define container_of(pointer, type, member)                                                        \
+  (reinterpret_cast<type*>((reinterpret_cast<char*>(pointer) - offsetof(type, member))))
 
 namespace Network::Servers::HTTP
 {
@@ -214,7 +219,9 @@ namespace Network::Servers::HTTP
             return client.saveHeaders(headers);
         }
         if (state == ClientState::Processing)
-        {   // Ok, the header were accepted, let's start processing this route
+        {   // Ok, the headers were accepted, let's start processing this route
+            if (headers.template getHeader<Headers::Connection>().getValueElement(0) == Connection::close)
+                client.forceCloseConnection();
             return CallbackCRTP(client, headers) ? ClientState::Done : ClientState::Error;
         }
         return state;
@@ -343,8 +350,10 @@ namespace Network::Servers::HTTP
                         {   // Yes we can, trigger the router with them
                             switch (Router.process(*client))
                             {
-                            case ClientState::Error: closeClient(client); break;
-                            case ClientState::Done:  closeClient(client); break;
+                            case ClientState::Error:
+                            case ClientState::Done:
+                                if (client->closeOnAnswer) pool.remove(client->socket);
+                            break;
                             // Don't remove the client from the pool in that case, let's simply continue later on
                             case ClientState::Processing: break;
                             case ClientState::NeedRefill: break;

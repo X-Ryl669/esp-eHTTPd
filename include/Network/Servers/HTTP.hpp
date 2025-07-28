@@ -2,8 +2,8 @@
 #define hpp_Server_HTTP_hpp
 
 
-// We need HTTP parsers here
-#include "Parser.hpp"
+// We need headers array too
+#include "HeadersArray.hpp"
 // We need the socket code too for clients and server
 #include "Network/Socket.hpp"
 // We need intToStr
@@ -15,20 +15,15 @@
 #include "Container/RingBuffer.hpp"
 // We need streams too
 #include "Streams/Streams.hpp"
+// We need forms too
+#include "Forms.hpp"
 
 #include <type_traits>
-// We need offsetof for making the container_of macro
-#include <cstddef>
+
 
 #ifndef ClientBufferSize
   #define ClientBufferSize 1024
 #endif
-
-
-
-#define container_of(pointer, type, member)                                                        \
-  (reinterpret_cast<type*>((reinterpret_cast<char*>(pointer) - offsetof(type, member))))
-
 
 namespace Network::Servers::HTTP
 {
@@ -47,8 +42,6 @@ namespace Network::Servers::HTTP
     static constexpr const char ChunkedEncoding[] = "Transfer-Encoding:chunked\r\n\r\n";
     static constexpr const char ConnectionClose[] = "Connection:close\r\n";
 
-    using namespace Protocol::HTTP;
-
     /** The current client parsing state */
     enum class ClientState
     {
@@ -57,386 +50,6 @@ namespace Network::Servers::HTTP
         NeedRefill  = 2,
         Done        = 3,
     };
-
-
-    namespace Details
-    {
-        // This works when they are all the same type
-        template<typename Result, typename... Ts>
-        Result& runtime_get(std::size_t i, std::tuple<Ts...>& t)  {
-            return [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
-                return std::array<std::reference_wrapper<Result>, sizeof...(Ts)>{ (Result&)std::get<Is>(t)... }[i];
-            }(std::index_sequence_for<Ts...>());
-        }
-
-        // Convert a std::array of headers to a parametric typelist
-        template <Headers E> struct MakeRequest { typedef Protocol::HTTP::RequestHeader<E> Type; };
-        // Convert a std::array of headers to a parametric answer list
-        template <Headers E> struct MakeAnswer { typedef Protocol::HTTP::AnswerHeader<E> Type; };
-    }
-
-    // Useless vomit of useless garbage to get the inner content of a typelist
-    template <auto headerArray, typename U> struct HeadersArray {};
-    // Useless vomit of useless garbage to get the inner content of a typelist
-    template <auto headerArray, typename U> struct AnswerHeadersArray {};
-    /** The headers array with a compile time defined heterogenous tuple of headers */
-    template <auto headerArray, typename ... Header>
-    struct HeadersArray<headerArray, Container::TypeList<Header...>>
-    {
-        std::tuple<Header...> headers;
-
-        // Runtime version, slower O(N) at runtime, and takes more binary space since it must store an array of values here
-        RequestHeaderBase * getHeader(const Headers h)
-        {
-            // Need to find the position in the tuple first
-            std::size_t pos = 0;
-            for(; pos < headerArray.size(); ++pos) if (headerArray[pos] == h) break;
-            if (pos == headerArray.size()) return 0; // Not found, don't waste time searching for it
-
-            return &Details::runtime_get<RequestHeaderBase>(pos, headers);
-        }
-
-        static constexpr std::size_t findHeaderPos(const Headers h) {
-            std::size_t pos = 0;
-            for(; pos < headerArray.size(); ++pos) if (headerArray[pos] == h) break;
-            return pos;
-        }
-        // Compile time version, faster O(1) at runtime, and smaller, obviously
-        template <Headers h>
-        RequestHeader<h> & getHeader()
-        {
-            constexpr std::size_t pos = findHeaderPos(h);
-            if constexpr (pos == headerArray.size())
-            {   // If the compiler stops here, you're querying a header that doesn't exist...
-                throw "Invalid header given for this type, it doesn't contain any";
-//                    static RequestHeader<h> invalid;
-//                    return invalid;
-            }
-            return std::get<pos>(headers);
-        }
-        // Compile time version, faster O(1) at runtime, and smaller, obviously
-        template <Headers h>
-        const RequestHeader<h> & getHeader() const
-        {
-            constexpr std::size_t pos = findHeaderPos(h);
-            if constexpr (pos == headerArray.size())
-            {   // If the compiler stops here, you're querying a header that doesn't exist...
-                throw "Invalid header given for this type, it doesn't contain any";
-//                    static RequestHeader<h> invalid;
-//                    return invalid;
-            }
-            return std::get<pos>(headers);
-        }
-
-        // Runtime version to test if we are interested in a specific header (speed up O(M*N) search to O(m*N) search instead)
-        Headers acceptHeader(const ROString & header)
-        {
-            // Only search for headers we are interested in
-            for(std::size_t pos = 0; pos < headerArray.size(); ++pos)
-                if (header == Refl::toString(headerArray[pos])) return headerArray[pos];
-
-            return Headers::Invalid;
-        }
-
-        // Runtime version to accept header and parse the value in the expected element
-        ParsingError acceptAndParse(const ROString & header, ROString & input)
-        {
-            ParsingError err = InvalidRequest;
-            [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
-                return ((header == Refl::toString(headerArray[Is]) ? (err = std::get<Is>(headers).acceptValue(input), true) : false) || ...);
-            }(std::make_index_sequence<sizeof...(Header)>{});
-            return err;
-        }
-
-        constexpr std::size_t getRequiredVaultSize()
-        {
-            return [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
-                return (std::get<Is>(headers).parsed.getDataSize() + ...);
-            }(std::make_index_sequence<sizeof...(Header)>{});
-        }
-
-        static bool saveBuf(void * src, void * dest, std::size_t s, uint8 *& buf, std::size_t & size)
-        {
-            if (s > size) return false;
-            memcpy(dest, src, s);
-            buf += s;
-            size -= s;
-            return true;
-        }
-
-        template <typename T>
-        static bool serializeHeaderToBuffer(T & t, uint8 *& buf, std::size_t & size, void * b, bool direction)
-        {
-            std::size_t s = 0;
-            void *& src = direction ? b : (void*&)buf, *& dest = direction ? (void*&)buf : b;
-            if (t.getDataPtr(b, s))
-                return saveBuf(src, dest, s, buf, size);
-
-            if constexpr(requires { t.count; }) {
-                if (!saveBuf(src, dest, s, buf, size)) return false;
-                for (uint8 i = 0; i < t.count; i++)
-                {
-                    t.value[i].getDataPtr(b, s);
-                    if (!saveBuf(src, dest, s, buf, size)) return false;
-                }
-                return true;
-            } else return false;
-        }
-
-        template <typename T>
-        bool saveHeaderToBuffer(T & t, uint8 *& buf, std::size_t & size) { void * b = 0; return serializeHeaderToBuffer(t, buf, size, b, true); }
-        template <typename T>
-        bool loadHeaderFromBuffer(T & t, uint8 *& buf, std::size_t & size) { void * b = 0; return serializeHeaderToBuffer(t, buf, size, b, false); }
-
-        template <std::size_t N>
-        bool saveInVault(Container::TranscientVault<N> & buffer)
-        {
-            std::size_t size = getRequiredVaultSize();
-            // Save the buffer to the stack before being erased (in reverse order)
-            if (uint8 * buf = buffer.reserveInVault(size))
-            {
-                // Got a buffer, it's time to save all of our stuff in that buffer
-                bool ret = [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
-                    return (saveHeaderToBuffer(std::get<Is>(headers).parsed, buf, size) && ...);
-                }(std::make_index_sequence<sizeof...(Header)>{});
-                return ret;
-            }
-            return false;
-        }
-
-        template <std::size_t N>
-        bool loadFromVault(Container::TranscientVault<N> & buffer)
-        {
-            std::size_t size = buffer.vaultSize();
-            // Save the buffer to the stack before being erased (in reverse order)
-            if (uint8 * buf = buffer.getVaultHead())
-            {
-                // Got a buffer, it's time to save all of our stuff in that buffer
-                bool ret = [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
-                    return (loadHeaderFromBuffer(std::get<Is>(headers).parsed, buf, size) && ...);
-                }(std::make_index_sequence<sizeof...(Header)>{});
-                return ret;
-            }
-            return false;
-        }
-    };
-
-    struct Unobtainium {};
-    template <class... T> struct always_false : std::false_type {};
-    template <> struct always_false<Unobtainium> : std::true_type {};
-
-    template <auto headerArray, typename ... Header>
-    struct AnswerHeadersArray<headerArray, Container::TypeList<Header...>>
-    {
-        std::tuple<Header...> headers;
-
-        static constexpr std::size_t findHeaderPos(const Headers h) {
-            std::size_t pos = 0;
-            for(; pos < headerArray.size(); ++pos) if (headerArray[pos] == h) break;
-            return pos;
-        }
-        // Compile time version, faster O(1) at runtime, and smaller, obviously
-        template <Headers h>
-        AnswerHeader<h> & getHeader()
-        {
-            constexpr std::size_t pos = findHeaderPos(h);
-            if constexpr (pos == headerArray.size())
-            {   // If the compiler stops here, you're querying a header that doesn't exist...
-                throw "Invalid header given for this type, it doesn't contain any";
-//                    static RequestHeader<h> invalid;
-//                    return invalid;
-            } else return std::get<pos>(headers);
-        }
-
-        template <Headers h>
-        const AnswerHeader<h> & getHeader() const
-        {
-            constexpr std::size_t pos = findHeaderPos(h);
-            if constexpr (pos == headerArray.size())
-            {   // If the compiler stops here, you're querying a header that doesn't exist...
-                // The error is probably that you forgot to add this header in the route, or you're using the same
-                // callback for a POST and GET method (the former adds ContentLength automatically, but the latter doesn't)
-                // In that case, either add the missing header or split in 2 routes for each method
-                throw "Invalid header given for this type, it doesn't contain any";
-//                    static RequestHeader<h> invalid;
-//                    return invalid;
-            } else return std::get<pos>(headers);
-        }
-
-        template <Headers h>
-        bool hasValidHeader() const
-        {
-            constexpr std::size_t pos = findHeaderPos(h);
-            if constexpr (pos == headerArray.size())
-            {
-                return false;
-            } else
-            {
-                return std::get<pos>(headers).isSet();
-            }
-        }
-
-        template <Headers h, typename Value>
-        bool setHeaderIfUnset(Value && v) const
-        {
-            constexpr std::size_t pos = findHeaderPos(h);
-            if constexpr (pos != headerArray.size())
-            {
-                if (auto & header = std::get<pos>(headers); header.isSet())
-                {
-                    header.setValue(std::forward(v));
-                    return true;
-                }
-            }
-            return false;
-        }
-
-
-        bool sendHeaders(Container::TrackedBuffer & buffer)
-        {
-            return [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
-                return (std::get<Is>(headers).write(buffer) && ...);
-            }(std::make_index_sequence<sizeof...(Header)>{});
-        }
-    };
-
-    /** Convert the list of headers you're expecting to the matching HeadersArray the library is using */
-    template <Headers ... allowedHeaders>
-    struct ToHeaderArray {
-        static constexpr auto headersArray = Container::getUnique<std::array{allowedHeaders...}, std::array{Headers::Authorization, Headers::Connection}>();
-        typedef HeadersArray<headersArray, decltype(Container::makeTypes<Details::MakeRequest, headersArray>())> Type;
-    };
-
-    /** Convert the list of headers you're expecting to the matching HeadersArray the library is using */
-    template <Headers ... allowedHeaders>
-    struct ToPostHeaderArray {
-        static constexpr auto headersArray = Container::getUnique<std::array{allowedHeaders...}, std::array{Headers::ContentType, Headers::ContentLength, Headers::Connection}>();
-        typedef HeadersArray<headersArray, decltype(Container::makeTypes<Details::MakeRequest, headersArray>())> Type;
-    };
-
-
-    template <MethodsMask mask, Headers ... allowedHeaders>
-    struct MakeHeadersArray {
-        // Select the best header array implementation here
-        static constexpr auto bestHeaderArray() {
-            if constexpr (mask.mask & MethodsMask{Method::POST, Method::PUT}.mask)
-                return typename ToPostHeaderArray<allowedHeaders...>::Type{};
-            else
-                return typename ToHeaderArray<allowedHeaders...>::Type{};
-        }
-
-        typedef decltype(bestHeaderArray()) Type;
-    };
-
-
-    template <Headers ... answerHeaders>
-    struct ToAnswerHeader {
-        static constexpr size_t HeaderCount = sizeof...(answerHeaders);
-        static constexpr auto headersArray = Container::getUnique<std::array<Headers, HeaderCount>{answerHeaders...}, std::array<Headers, 1> {Headers::WWWAuthenticate}>();
-        typedef AnswerHeadersArray<headersArray, decltype(Container::makeTypes<Details::MakeAnswer, headersArray>())> Type;
-    };
-
-
-    /** Store the result of a form that's was posted  */
-    template <CompileTime::str ... keys>
-    struct FormPost
-    {
-        typedef int IsAFormPost; // Simpler to require a member than a template in constexpr expression later on
-
-        /** Where the found values are stored */
-        ROString values[sizeof...(keys)];
-
-        static constexpr std::size_t findKeyPos(const ROString key)
-        {
-            std::size_t pos = 0;
-            [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
-                return ((key == keys ? false : ++pos) && ...);
-            }(std::make_index_sequence<sizeof...(keys)>{});
-            return pos;
-        }
-
-        static constexpr std::size_t keysCount() { return sizeof...(keys); }
-
-        /** Get the value for the given key */
-        ROString getValue(const ROString key)
-        {
-            std::size_t pos = findKeyPos(key);
-            if (pos == keysCount()) return ROString();
-            return values[pos];
-        }
-
-        /** Parse the values from the keys and the given buffer */
-        void parse(ROString buffer)
-        {
-            // Escape all URL encoded char here
-            buffer = Path::URLDecode(buffer);
-            while (buffer)
-            {
-                ROString key = buffer.splitUpTo("=");
-                if (key) {
-                    std::size_t p = findKeyPos(key);
-                    if (p == keysCount()) (void)buffer.splitUpTo("&");
-                    else values[p] = buffer.splitUpTo("&");
-                }
-            }
-        }
-    };
-
-    /** Store the result of a form that's was posted  */
-    template <unsigned ... keysHash>
-    struct HashFormPost
-    {
-        typedef int IsAFormPost; // Simpler to "requires" this member than a complex template in constexpr expression later on
-
-        /** Where the found values are stored */
-        ROString values[sizeof...(keysHash)];
-
-        static constexpr std::size_t findKeyPos(const size_t keyHash)
-        {
-            std::size_t pos = 0;
-            [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
-                return ((keyHash == keysHash ? false : ++pos) && ...);
-            }(std::make_index_sequence<sizeof...(keysHash)>{});
-            return pos;
-        }
-
-        static constexpr std::size_t keysCount() { return sizeof...(keysHash); }
-
-        /** Get the value for the given key */
-        ROString getValue(const ROString key) { return getValue(CompileTime::constHash(key.getData(), key.getLength())); }
-
-        /** Get the value for the given key */
-        ROString getValue(const unsigned key)
-        {
-            std::size_t pos = findKeyPos(key);
-            if (pos == keysCount()) return ROString();
-            return values[pos];
-        }
-        /** Compile time version (even faster, since position is computed at compile time) */
-        template <unsigned hash>
-        ROString getValue() {
-            constexpr std::size_t pos = findKeyPos(hash);
-            if (pos == keysCount()) return ROString();
-            return values[pos];
-        }
-
-        /** Parse the values from the keys and the given buffer */
-        void parse(ROString buffer)
-        {
-            // Escape all URL encoded char here
-            buffer = Path::URLDecode(buffer);
-            while (buffer)
-            {
-                ROString key = buffer.splitUpTo("=");
-                if (key) {
-                    std::size_t p = findKeyPos(CompileTime::constHash(key.getData(), key.getLength()));
-                    if (p == keysCount()) (void)buffer.splitUpTo("&");
-                    else values[p] = buffer.splitUpTo("&");
-                }
-            }
-        }
-    };
-
 
     /** A client which is linked with a single session.
         There's a fixed possible number of clients while a server is started to avoid dynamic allocation (and memory fragmentation)
@@ -468,6 +81,8 @@ namespace Network::Servers::HTTP
         Container::TranscientVault<ClientBufferSize> recvBuffer;
         /** The current request as received and parsed by the server */
         RequestLine reqLine;
+        /** Whether to close or keep the connection open after this request */
+        bool closeOnAnswer = false;
 
         /** The content length for the answer */
         std::size_t answerLength;
@@ -475,7 +90,7 @@ namespace Network::Servers::HTTP
 
         /** Send the client answer as expected */
         template <typename T>
-        bool sendAnswer(T && clientAnswer, bool close = false) {
+        bool sendAnswer(T && clientAnswer) {
             if (!sendStatus(clientAnswer.getCode())) return false;
 
             // We'll be loosing the URI content when we clear the recvBuffer for sending data back, so store the
@@ -484,8 +99,8 @@ namespace Network::Servers::HTTP
             memcpy(URI, reqLine.URI.absolutePath.getData(), reqLine.URI.absolutePath.getLength());
 
             recvBuffer.reset();
-            // Force closing the connection, we don't support Keep-Alive connections by default TODO
-            if (!clientAnswer.template hasValidHeader<Headers::Connection>())
+            // Force closing the connection if required or asked, we don't send the Connection:keep-alive header since it's the default in HTTP/1.1
+            if (closeOnAnswer)
                 socket.send(ConnectionClose, sizeof(ConnectionClose) - 1);
 
             if (!clientAnswer.sendHeaders(*this)) return false;
@@ -498,7 +113,7 @@ namespace Network::Servers::HTTP
                 {
                     if (!sendSize(answerLength))
                     {
-                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 523, close ? " closed" : "");
+                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 523, closeOnAnswer ? " closed" : "");
                         return false;
                     }
 
@@ -520,14 +135,14 @@ namespace Network::Servers::HTTP
 
                     if (!clientAnswer.sendContent(*this, answerLength))
                     {
-                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, 0U, 524, close ? " closed" : "");
+                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, 0U, 524, closeOnAnswer ? " closed" : "");
                         return false;
                     }
                 } else if (!stream.hasContent())
                 {
                     if (!sendSize(0))
                     {
-                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, close ? " closed" : "");
+                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, closeOnAnswer ? " closed" : "");
                         return false;
                     }
                 }
@@ -535,14 +150,14 @@ namespace Network::Servers::HTTP
             {
                 if (!sendSize(0))
                 {
-                    SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, close ? " closed" : "");
+                    SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, closeOnAnswer ? " closed" : "");
                     return false;
                 }
             }
 
-            SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, (int)clientAnswer.getCode(), close ? " closed" : "");
+            SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, (int)clientAnswer.getCode(), closeOnAnswer ? " closed" : "");
             parsingStatus = ReqDone;
-            if (close) reset();
+            reset();
             return true;
         }
 
@@ -572,7 +187,8 @@ namespace Network::Servers::HTTP
         bool reply(Code statusCode, const ROString & msg, bool close = false);
         bool reply(Code statusCode);
 
-        bool closeWithError(Code code) { return reply(code); }
+        bool closeWithError(Code code) { forceCloseConnection(); return reply(code); }
+        void forceCloseConnection() { closeOnAnswer = true; }
 
 
         uint32 persistVaultSize = 0;
@@ -730,9 +346,10 @@ namespace Network::Servers::HTTP
             recvBuffer.reset();
             reqLine.reset();
             parsingStatus = Invalid;
-            socket.reset();
+            if (closeOnAnswer) socket.reset();
             answerLength = 0;
             persistVaultSize = 0;
+            closeOnAnswer = false;
         }
 
     };
@@ -753,7 +370,7 @@ namespace Network::Servers::HTTP
     struct ClientAnswer
     {
         // Construct the answer header array
-        typedef ToAnswerHeader<answerHeaders...>::Type ExpectedHeaderArray;
+        typedef typename ToAnswerHeader<answerHeaders...>::Type ExpectedHeaderArray;
         ExpectedHeaderArray headers;
         /** The reply status code to use */
         Code                replyCode;
@@ -951,9 +568,10 @@ namespace Network::Servers::HTTP
         {   // Persist it
             if (!Container::persistString(const_cast<ROString&>(msg), recvBuffer, recvBuffer.getSize())) return false;
         }
-        return sendAnswer(SimpleAnswer<MIMEType::text_plain>{statusCode, msg }, close);
+        if (close) closeOnAnswer = true;
+        return sendAnswer(SimpleAnswer<MIMEType::text_plain>{statusCode, msg });
     }
-    bool Client::reply(Code statusCode) { return sendAnswer(CodeAnswer{statusCode}, true); }
+    bool Client::reply(Code statusCode) { return sendAnswer(CodeAnswer{statusCode}); }
 }
 
 
