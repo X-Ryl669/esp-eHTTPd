@@ -81,8 +81,9 @@ namespace Network::Servers::HTTP
         Container::TranscientVault<ClientBufferSize> recvBuffer;
         /** The current request as received and parsed by the server */
         RequestLine reqLine;
-        /** Whether to close or keep the connection open after this request */
-        bool closeOnAnswer = false;
+        /** Whether to close or keep the connection open after this request.
+            When a connection is kept open, each loop without activity will decrease the TTL until it reaches 0 and force the client connection to close */
+        uint8       timeToLive = 0;
 
         /** The content length for the answer */
         std::size_t answerLength;
@@ -100,7 +101,7 @@ namespace Network::Servers::HTTP
 
             recvBuffer.reset();
             // Force closing the connection if required or asked, we don't send the Connection:keep-alive header since it's the default in HTTP/1.1
-            if (closeOnAnswer)
+            if (!timeToLive)
                 socket.send(ConnectionClose, sizeof(ConnectionClose) - 1);
 
             if (!clientAnswer.sendHeaders(*this)) return false;
@@ -113,7 +114,7 @@ namespace Network::Servers::HTTP
                 {
                     if (!sendSize(answerLength))
                     {
-                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 523, closeOnAnswer ? " closed" : "");
+                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 523, !timeToLive ? " closed" : "");
                         return false;
                     }
 
@@ -135,14 +136,14 @@ namespace Network::Servers::HTTP
 
                     if (!clientAnswer.sendContent(*this, answerLength))
                     {
-                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, 0U, 524, closeOnAnswer ? " closed" : "");
+                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, 0U, 524, !timeToLive ? " closed" : "");
                         return false;
                     }
                 } else if (!stream.hasContent())
                 {
                     if (!sendSize(0))
                     {
-                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, closeOnAnswer ? " closed" : "");
+                        SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, !timeToLive ? " closed" : "");
                         return false;
                     }
                 }
@@ -150,12 +151,12 @@ namespace Network::Servers::HTTP
             {
                 if (!sendSize(0))
                 {
-                    SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, closeOnAnswer ? " closed" : "");
+                    SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, 525, !timeToLive ? " closed" : "");
                     return false;
                 }
             }
 
-            SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, (int)clientAnswer.getCode(), closeOnAnswer ? " closed" : "");
+            SLog(Level::Info, "Client %s [%.*s](%u): %d%s", socket.address, (int)reqLine.URI.absolutePath.getLength(), URI, answerLength, (int)clientAnswer.getCode(), !timeToLive ? " closed" : "");
             parsingStatus = ReqDone;
             reset();
             return true;
@@ -188,7 +189,7 @@ namespace Network::Servers::HTTP
         bool reply(Code statusCode);
 
         bool closeWithError(Code code) { forceCloseConnection(); return reply(code); }
-        void forceCloseConnection() { closeOnAnswer = true; }
+        void forceCloseConnection() { timeToLive = 0; }
 
 
         uint32 persistVaultSize = 0;
@@ -278,6 +279,7 @@ namespace Network::Servers::HTTP
         }
 
         bool parse() {
+            timeToLive = 255; 
             ROString buffer = recvBuffer.getView<ROString>();
             switch (parsingStatus)
             {
@@ -338,6 +340,19 @@ namespace Network::Servers::HTTP
         ROString getRequestedPath() const { return reqLine.URI.onlyPath(); }
         /** Check if the client is valid */
         bool isValid() const { return socket.isValid(); }
+        /** Decrease time to live (and close the socket if required) 
+            @return true if closed */
+        bool tickTimeToLive() {
+            if (!timeToLive) return false;
+            if (--timeToLive == 0) 
+            {
+                reset(); 
+                return true;
+            }
+            return false;
+        }
+        /** Socket was accepted */
+        void accepted() { timeToLive = 255; }
 
 
     protected:
@@ -346,12 +361,10 @@ namespace Network::Servers::HTTP
             recvBuffer.reset();
             reqLine.reset();
             parsingStatus = Invalid;
-            if (closeOnAnswer) socket.reset();
+            if (!timeToLive) socket.reset();
             answerLength = 0;
             persistVaultSize = 0;
-            closeOnAnswer = false;
         }
-
     };
 
 
@@ -568,7 +581,7 @@ namespace Network::Servers::HTTP
         {   // Persist it
             if (!Container::persistString(const_cast<ROString&>(msg), recvBuffer, recvBuffer.getSize())) return false;
         }
-        if (close) closeOnAnswer = true;
+        if (close) timeToLive = 0;
         return sendAnswer(SimpleAnswer<MIMEType::text_plain>{statusCode, msg });
     }
     bool Client::reply(Code statusCode) { return sendAnswer(CodeAnswer{statusCode}); }

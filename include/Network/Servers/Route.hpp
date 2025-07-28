@@ -317,6 +317,11 @@ namespace Network::Servers::HTTP
         /** The main server loop */
         Error loop(uint32 timeoutMs = 20)
         {
+            // Kill any lingering client if any
+            for (auto i = 0; i < MaxClientCount; i++)
+            {
+                if (clientsArray[i].tickTimeToLive()) pool.remove(clientsArray[i].socket);
+            }
             if (pool.selectActive(timeoutMs) == Success)
             {   // At least, one socket made progress, so deal with it
 
@@ -326,6 +331,7 @@ namespace Network::Servers::HTTP
                 {
                     // Got a client for a socket, so need to fill the client buffer and let it progress parsing
                     Client * client = container_of(socket, Client, socket);
+                    
                     // Check if we can fill the receive buffer first
                     uint32 availableLength = client->recvBuffer.freeSize();
                     if (!availableLength)
@@ -351,7 +357,7 @@ namespace Network::Servers::HTTP
                             {
                             case ClientState::Error:
                             case ClientState::Done:
-                                if (client->closeOnAnswer) pool.remove(client->socket);
+                                if (!client->timeToLive) { pool.remove(client->socket); }
                             break;
                             // Don't remove the client from the pool in that case, let's simply continue later on
                             case ClientState::Processing: break;
@@ -372,6 +378,8 @@ namespace Network::Servers::HTTP
 
                             // Client was received, so let's add this to the loop
                             if (!pool.append(clientsArray[i].socket)) return AllocationFailure;
+
+                            clientsArray[i].accepted();
                             break;
                         }
 
