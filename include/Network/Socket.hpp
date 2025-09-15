@@ -17,9 +17,17 @@
 #include <netinet/tcp.h>
 // We need sockaddr_in
 #include <netinet/in.h>
+#if BuildClient == 1
+  #include <fcntl.h>
+  #include <netdb.h>
+#endif
+
 #if UseTLS == 1
 // We need MBedTLS code
-#include <mbedtls/certs.h>
+#include <mbedtls/version.h>
+#if MBEDTLS_VERSION_MAJOR < 3
+  #include <mbedtls/certs.h>
+#endif
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/error.h>
@@ -74,6 +82,67 @@ namespace Network {
 
             return Success;
         }
+
+#if BuildClient == 1
+        /** Connect to a given URI */
+        Virtual Error connect(const char * host, const uint16 port, const uint32 timeoutMillis = (uint32)-1, const ROString * = nullptr)
+        {
+            socket = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (socket == -1) return SocketCreation;
+
+            // Please notice that under linux, it's not required to set the socket
+            // as non blocking if you define SO_SNDTIMEO, for connect timeout.
+            // so the code below could be optimized away. Yet, lwIP does show the
+            // same behavior so when a timeout for connection is actually required
+            // you must issue a select call here.
+
+            // Set non blocking here
+            int socketFlags = ::fcntl(socket, F_GETFL, 0);
+            if (socketFlags == -1) return SocketOption;
+            if (::fcntl(socket, F_SETFL, (socketFlags | O_NONBLOCK)) != 0) return SocketOption;
+
+            // Let the socket be without Nagle's algorithm
+            int flag = 1;
+            if (::setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) return SocketOption;
+            // Then connect the socket to the server
+            struct addrinfo hints = {};
+            hints.ai_family = AF_INET; // IPv4 only for now
+            hints.ai_flags = AI_ADDRCONFIG;
+            hints.ai_socktype = SOCK_STREAM;
+
+            // Resolve address
+            struct addrinfo *result = NULL;
+            if (getaddrinfo(host, NULL, &hints, &result) < 0 || result == NULL) return AddressInfo;
+
+            // Then connect to it
+            struct sockaddr_in address;
+            address.sin_port = htons(port);
+            address.sin_family = AF_INET;
+            address.sin_addr = ((struct sockaddr_in *)(result->ai_addr))->sin_addr;
+
+            // free result
+            freeaddrinfo(result);
+            int ret = ::connect(socket, (const sockaddr*)&address, sizeof(address));
+            if (ret < 0 && errno != EINPROGRESS) return Connect;
+            if (ret == 0) return Success;
+
+            // Here, we need to wait until connection happens or times out
+            if (Error err = select(false, true); err.isError()) return err;
+
+            // Check for any socket errors (like ConnectionRefused)
+            socklen_t len = sizeof(ret);
+            if (!::getsockopt(socket, SOL_SOCKET, SO_ERROR, &ret, &len) && ret) return Connect;
+
+            // Restore blocking behavior here
+            if (::fcntl(socket, F_SETFL, socketFlags) != 0) return SocketOption;
+            // And set timeouts for both recv and send
+            struct timeval v = timeoutFromMs(timeoutMillis);
+            if (::setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &v, sizeof(v)) < 0) return SocketOption;
+            if (::setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &v, sizeof(v)) < 0) return SocketOption;
+            // Ok, done!
+            return Success;
+        }
+#endif
 
 
         /** Accept a new client.
@@ -153,46 +222,49 @@ namespace Network {
         mbedtls_net_context net;
 
     private:
-        Error buildServerConf(const ROString & serverCert, const ROString & keyFile)
+        Error buildServerConf(const ROString & serverCert, const ROString & keyFile, const uint32 timeoutMs)
         {
             if (!serverCert || !keyFile) return ArgumentsMissing;
 
             // Use given root certificate (if you have a recent version of mbedtls, you could use mbedtls_x509_crt_parse_der_nocopy instead to skip a useless copy here)
-            if (::mbedtls_x509_crt_parse_der(&cacert, serverCert.getData(), serverCert.getLength()))
+            if (::mbedtls_x509_crt_parse_der(&cacert, (const uint8*)serverCert.getData(), serverCert.getLength()))
                 return BadCertificate;
 
-            if (::mbedtls_pk_parse_key(&pk, keyFile.getData(), keyFile.getLength(), NULL, 0))
+            if (::mbedtls_pk_parse_key(&pk, (const uint8*)keyFile.getData(), keyFile.getLength(), NULL, 0
+#if MBEDTLS_VERSION_MAJOR >= 3
+              , ::mbedtls_ctr_drbg_random, &entropySource
+#endif
+            ))
                 return BadPrivateKey;
 
             // Now create configuration from default
             if (::mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT))
                 return SSLConfig;
 
-            return buildConf(true, true);
+            return buildConf(true, true, timeoutMs);
         }
 
-        Error buildClientConf(const ROString & serverCert)
+        Error buildClientConf(const ROString & serverCert, const uint32 timeoutMs)
         {
 
             // Use given root certificate (if you have a recent version of mbedtls, you could use mbedtls_x509_crt_parse_der_nocopy instead to skip a useless copy here)
-            if (serverCert && ::mbedtls_x509_crt_parse_der(&cacert, serverCert.getData(), serverCert.getLength()))
+            if (serverCert && ::mbedtls_x509_crt_parse_der(&cacert, (const uint8*)serverCert.getData(), serverCert.getLength()))
                 return BadCertificate;
 
             // Now create configuration from default
             if (::mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT))
                 return SSLConfig;
 
-            return buildConf(serverCert, false);
+            return buildConf(serverCert, false, timeoutMs);
         }
 
-        Error buildConf(bool hasCert, bool hasPKey)
+        Error buildConf(bool hasCert, bool hasPKey, const uint32 timeoutMs)
         {
             ::mbedtls_ssl_conf_ca_chain(&conf, &cacert, NULL); // Example use cacert.next, check this
             if (hasPKey && ::mbedtls_ssl_conf_own_cert(&conf, &cacert, &pk)) return BadCertificate;
             else ::mbedtls_ssl_conf_authmode(&conf, hasCert ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_NONE);
 
-            uint32_t ms = timeoutMs.tv_usec / 1000;
-            ::mbedtls_ssl_conf_read_timeout(&conf, ms < 50 ? 3000 : ms);
+            ::mbedtls_ssl_conf_read_timeout(&conf, timeoutMs < 50 ? 3000 : timeoutMs);
 
             // Random number generator
             ::mbedtls_ssl_conf_rng(&conf, ::mbedtls_ctr_drbg_random, &entropySource);
@@ -206,7 +278,7 @@ namespace Network {
         }
 
     public:
-        MBTLSSocket(struct timeval & timeoutMs) : BaseSocket(timeoutMs)
+        MBTLSSocket() : BaseSocket()
         {
             mbedtls_ssl_init(&ssl);
             mbedtls_ssl_config_init(&conf);
@@ -227,31 +299,31 @@ namespace Network {
             mbedtls_ssl_session_reset(&ssl);
             return Success;
         }
-/*
-        int connect(const char * host, uint16 port, const v5::DynamicBinDataView * brokerCert)
+
+#if BuildClient == 1
+        Error connect(const char * host, uint16 port, const uint32 timeoutMillis = (uint32)-1, const ROString * serverCert = nullptr)
         {
-            int ret = BaseSocket::connect(host, port, 0);
-            if (ret) return ret;
+            if (Error ret = BaseSocket::connect(host, port, timeoutMillis, nullptr); ret.isError()) return ret;
 
             // MBedTLS doesn't deal with natural socket timeout correctly, so let's fix that
             struct timeval zeroTO = {};
-            if (::setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &zeroTO, sizeof(zeroTO)) < 0) return -4;
-            if (::setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &zeroTO, sizeof(zeroTO)) < 0) return -4;
+            if (::setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &zeroTO, sizeof(zeroTO)) < 0) return SocketOption;
+            if (::setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &zeroTO, sizeof(zeroTO)) < 0) return SocketOption;
 
             net.fd = socket;
 
-            if (!buildConf(brokerCert))                                             return -8;
-            if (::mbedtls_ssl_set_hostname(&ssl, host))                             return -9;
+            if (Error ret = buildClientConf(serverCert ? *serverCert : "", timeoutMillis); ret.isError()) return ret;
+            if (::mbedtls_ssl_set_hostname(&ssl, host))                             return SSLHostname;
 
             // Set the method the SSL engine is using to fetch/send data to the other side
             ::mbedtls_ssl_set_bio(&ssl, &net, ::mbedtls_net_send, NULL, ::mbedtls_net_recv_timeout);
 
-            ret = ::mbedtls_ssl_handshake(&ssl);
+            int ret = ::mbedtls_ssl_handshake(&ssl);
             if (ret != 0 && ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE)
-                return -10;
+                return SSLHandshake;
 
             // Check certificate if one provided
-            if (brokerCert)
+            if (serverCert)
             {
                 uint32_t flags = mbedtls_ssl_get_verify_result(&ssl);
                 if (flags != 0)
@@ -259,12 +331,13 @@ namespace Network {
                     char verify_buf[100] = {0};
                     mbedtls_x509_crt_verify_info(verify_buf, sizeof(verify_buf), "  ! ", flags);
                     printf("mbedtls_ssl_get_verify_result: %s flag: 0x%x\n", verify_buf, (unsigned int)flags);
-                    return -11;
+                    return SSLHandshake;
                 }
             }
-            return 0;
+            return Success;
         }
-*/
+#endif
+
         /** Accept a new client.
             @return 0 on success, negative value upon error */
         Error accept(BaseSocket & clientSocket, const uint32 timeoutMillis = 0)
@@ -305,7 +378,7 @@ namespace Network {
             return ::mbedtls_ssl_write(&ssl, (const uint8*)buffer, length);
         }
 
-        Error recv(char * buffer, const uint32 minLength, const uint32 maxLength = 0)
+        Error recv(char * buffer, const uint32 maxLength = 0, const uint32 minLength = 0)
         {
             uint32 ret = 0;
             while (ret < minLength)

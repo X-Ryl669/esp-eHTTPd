@@ -12,6 +12,11 @@
 // We need TmpString too to persist string and other dynamically sized content to a client's receive buffer
 #include "Container/TmpString.hpp"
 
+#if MinimizeStackSize == 1
+    // We need socket too for directly sending headers' value instead of storing them in a buffer (reduce binary size and stack usage)
+    #include "Network/Socket.hpp"
+#endif
+
 namespace Protocol::HTTP
 {
     enum ParsingError
@@ -22,6 +27,10 @@ namespace Protocol::HTTP
     };
 
     using Container::MaxPersistStringArray;
+
+#if MinimizeStackSize == 1
+    using Network::BaseSocket;
+#endif
 
     /** This interface is implemented in structure that take a reference on a temporary buffer and that need to save it to a persistant buffer */
     struct PersistantTag{};
@@ -57,7 +66,12 @@ namespace Protocol::HTTP
         struct ValueBase
         {
             virtual ParsingError parseFrom(ROString & value) = 0;
+#if MinimizeStackSize == 1
+            virtual bool send(BaseSocket &) const = 0;
+            virtual bool hasValue() const = 0;
+#else
             virtual bool write(char * buffer, std::size_t & size) const = 0;
+#endif
             template <Headers h, typename T> T * as() { if constexpr(std::is_same_v<typename ValueMap<h>::ExpectedType, T>) { return static_cast<typename ValueMap<h>::ExpectedType*>(this); } else return (void*)0; }
             virtual void getStringToPersist(MaxPersistStringArray & arr) {  }
         };
@@ -72,12 +86,17 @@ namespace Protocol::HTTP
                 value = val.Trim(' ');
                 return EndOfRequest;
             }
+#if MinimizeStackSize == 1
+            bool send(BaseSocket & socket) const { return socket.send(value.getData(), value.getLength()) == value.getLength(); }
+            bool hasValue() const { return value; }
+#else
             bool write(char * buffer, std::size_t & size) const
             {
                 WriteCheck(buffer, size, value.getLength());
                 memcpy(buffer, value.getData(), value.getLength());
                 return true;
             }
+#endif
             public: template <typename T> inline bool persist(T & buffer, std::size_t futureDrop = 0) { return Container::persistString(value, buffer, futureDrop); }
 
             void getStringToPersist(MaxPersistStringArray & arr) { arr[0] = &value; }
@@ -106,6 +125,16 @@ namespace Protocol::HTTP
                 value = (size_t)val.Trim(' ');
                 return EndOfRequest;
             }
+#if MinimizeStackSize == 1
+            bool send(BaseSocket & socket) const
+            {
+                char buf[sizeof("18446744073709551615")] = { };
+                intToStr((int)value, buf, 10);
+                std::size_t s = strlen(buf);
+                return socket.send(buf, s) == s;
+            }
+            bool hasValue() const { return true; }
+#else
             bool write(char * buffer, std::size_t & size) const
             {
                 char buf[sizeof("18446744073709551615")] = { };
@@ -115,6 +144,7 @@ namespace Protocol::HTTP
                 memcpy(buffer, buf, s);
                 return true;
             }
+#endif
             void setValue(const size_t v) { value = v; }
         };
 
@@ -129,6 +159,14 @@ namespace Protocol::HTTP
                 // If we find some unknown value, we don't return an error here, simply continue parsing
                 return value != (static_cast<Enum>(-1)) ? EndOfRequest : (strict ? InvalidRequest : EndOfRequest);
             }
+#if MinimizeStackSize == 1
+            bool send(BaseSocket & socket) const
+            {
+                ROString v = Refl::toString(value);
+                return socket.send(v.getData(), v.getLength()) == v.getLength();
+            }
+            bool hasValue() const { return static_cast<int>(value) != -1; }
+#else
             bool write(char * buffer, std::size_t & size) const
             {
                 ROString v = Refl::toString(value);
@@ -136,6 +174,7 @@ namespace Protocol::HTTP
                 memcpy(buffer, v.getData(), v.getLength());
                 return true;
             }
+#endif
             void setValue(const Enum v) { value = v; }
         };
         /** Simple enum value for the given type */
@@ -174,6 +213,14 @@ namespace Protocol::HTTP
                 value = Refl::fromString<Enum>(v).orElse(static_cast<Enum>(-1));
                 return err;
             }
+#if MinimizeStackSize == 1
+            bool send(BaseSocket & socket) const
+            {
+                ROString v = Refl::toString(value);
+                return socket.send(v.getData(), v.getLength()) == v.getLength();
+            }
+            bool hasValue() const { return static_cast<int>(value) != -1; }
+#else
             bool write(char * buffer, std::size_t & size) const
             {
                 ROString v = Refl::toString(value);
@@ -181,6 +228,7 @@ namespace Protocol::HTTP
                 memcpy(buffer, v.getData(), v.getLength());
                 return true;
             }
+#endif
             void setValue(const Enum v) { value = v; }
         };
 
@@ -201,6 +249,19 @@ namespace Protocol::HTTP
                 value = Refl::fromString<Enum>(v).orElse(static_cast<Enum>(-1));
                 return err;
             }
+#if MinimizeStackSize == 1
+            bool send(BaseSocket & socket) const
+            {
+                ROString v = Refl::toString(value);
+                if (socket.send(v.getData(), v.getLength()) != v.getLength()) return false;
+                if (attributes.getLength()) {
+                    if (socket.send("=", 1) != 1) return false;
+                    if (socket.send(attributes.getData(), attributes.getLength()) != attributes.getLength()) return false;
+                }
+                return true;
+            }
+            bool hasValue() const { return static_cast<int>(value) != -1; }
+#else
             bool write(char * buffer, std::size_t & size) const
             {
                 ROString v = Refl::toString(value);
@@ -212,6 +273,7 @@ namespace Protocol::HTTP
                 }
                 return true;
             }
+#endif
 
 
             ROString findAttributeValueFor(const ROString & key)
@@ -250,6 +312,19 @@ namespace Protocol::HTTP
                 }
                 return count < N ? MoreData : (strict ? InvalidRequest : MoreData); // Is there too much allowed element and we don't support them?
             }
+#if MinimizeStackSize == 1
+            bool send(BaseSocket & socket) const
+            {
+                if (!count) return true;
+                for (uint8 i = 0; i < count; i++) {
+                    if (!value[i].send(socket)) return false;
+                    if (i < count - 1 && socket.send(",", 1) != 1) return false;
+                }
+                return true;
+            }
+            bool hasValue() const { return count > 0; }
+
+#else
             bool write(char * buffer, std::size_t & size) const
             {
                 if (!count) { size = 0; return true; }
@@ -269,6 +344,8 @@ namespace Protocol::HTTP
                 }
                 return true;
             }
+#endif
+
             public: template <typename T> inline bool persist(T & buffer, std::size_t futureDrop = 0) {
                 for (uint8 i = 0; i < count; i++)
                     if (!value[i].persist(buffer, futureDrop)) return false;

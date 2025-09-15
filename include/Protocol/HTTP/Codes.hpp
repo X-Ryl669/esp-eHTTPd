@@ -62,6 +62,8 @@ namespace Protocol::HTTP
         GatewayTimedOut         = 504,
         UnsupportedHTTPVersion  = 505,
         ConnectionTimedOut      = 522,
+
+        ClientRequestError      = 600,
     };
 
 #if defined(MaxSupport)
@@ -109,6 +111,7 @@ namespace Protocol::HTTP
         case Code::GatewayTimedOut         : return "The gateway timed out";
         case Code::UnsupportedHTTPVersion  : return "The given HTTP version is not supported";
         case Code::ConnectionTimedOut      : return "The connection to the server timed out";
+        case Code::ClientRequestError      : return "Error in client request";
         default: return "";
         }
     }
@@ -165,6 +168,7 @@ namespace Refl
         case Code::GatewayTimedOut         : return "Gateway Timed Out";
         case Code::UnsupportedHTTPVersion  : return "Unsupported HTTP Version";
         case Code::ConnectionTimedOut      : return "Connection Timed Out";
+        case Code::ClientRequestError      : return "Client request error";
         default: return "";
         }
     }

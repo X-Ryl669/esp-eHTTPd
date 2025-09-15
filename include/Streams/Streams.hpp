@@ -121,7 +121,13 @@ namespace Streams
             bool setPos(const std::size_t pos)      { return f ? fseeko(f, pos, SEEK_SET) == 0 : false; }
 
         public:
-            FileBase(const char * path, bool write) : f(fopen(path, write ? "wb" : "rb")), size(0)
+            FileBase(const char * path, bool write) : f(fopen(path, write ? "wb" : "rb")), size(0){ computeSize(); }
+            FileBase(FileBase && move) : f(move.f), size(move.size) { move.close(false); }
+            FileBase(const int fileDescriptor, bool write) : f(fdopen(fileDescriptor, write ? "wb" : "rb")), size(0) { computeSize(); }
+            // virtual ~FileBase() { if (f) fclose(f); } // Would be convenient, but this imply a virtual table cost we don't want to pay
+
+        protected:
+            void computeSize()
             {
                 if (f) {
                     fseeko(f, 0, SEEK_END);
@@ -129,10 +135,6 @@ namespace Streams
                     fseeko(f, 0, SEEK_SET);
                 }
             }
-            FileBase(FileBase && move) : f(move.f), size(move.size) { move.close(false); }
-            // virtual ~FileBase() { if (f) fclose(f); } // Would be convenient, but this imply a virtual table cost we don't want to pay
-
-        protected:
             void close(bool close = true) { if (close && f) fclose(f); f = nullptr; size = 0; }
             // Prevent instantiating this class directly, except for derived class
             ~FileBase() {}
@@ -144,6 +146,16 @@ namespace Streams
         {
             std::size_t getPos() const              { return 0; }
             bool setPos(const std::size_t pos)      { return false; }
+        };
+
+        struct SocketBase : public Input<SocketBase>, public Output<SocketBase>, public NonSeekable, public NonMappeable, public WithContent
+        {
+            std::size_t getSize() const             { return 0; }
+            std::size_t read(void * buf, const std::size_t size) { return socket->recv((char*)buf, (uint32)size).getCount(); }
+            std::size_t write(const void * buf, const std::size_t size) { return socket->send((const char*)buf, (uint32)size).getCount(); }
+            SocketBase(Network::BaseSocket & socket) : socket(&socket) {}
+        protected:
+            Network::BaseSocket * socket;
         };
     }
 
@@ -207,6 +219,7 @@ namespace Streams
         using Private::FileBase::getSize;
         std::size_t read(void * buf, const std::size_t size) { return f ? fread(buf, 1, size, f) : 0; }
         FileInput(const char * path) : FileBase(path, false) {}
+        FileInput(const int fileDescriptor) : FileBase(fileDescriptor, false) {}
         ~FileInput() { close(); }
 
         FileInput(const FileInput &) = delete;
@@ -219,21 +232,41 @@ namespace Streams
         using Private::FileBase::getSize;
         std::size_t write(const void * buf, const std::size_t size) { return f ? fwrite(buf, 1, size, f) : 0; }
         FileOutput(const char * path) : FileBase(path, true) {}
+        FileOutput(const int fileDescriptor) : FileBase(fileDescriptor, true) {}
         ~FileOutput() { close(); }
 
         FileOutput(const FileOutput &) = delete;
         FileOutput(FileOutput && output) : FileBase(std::move(output)) {}
     };
 
+
+
     /** A socket stream that doesn't own the socket */
-    struct Socket final : public Input<Socket>, public Output<Socket>, public Private::NonSeekable, public Private::NonMappeable, public Private::WithContent
+    struct Socket final : public Private::SocketBase
     {
-        std::size_t getSize() const             { return 0; }
-        std::size_t read(void * buf, const std::size_t size) { return socket->recv((char*)buf, (uint32)size).getCount(); }
-        std::size_t write(const void * buf, const std::size_t size) { return socket->send((const char*)buf, (uint32)size).getCount(); }
-        Socket(Network::BaseSocket & socket) : socket(&socket) {}
-    protected:
-        Network::BaseSocket * socket;
+        Socket(Network::BaseSocket & socket) : Private::SocketBase(socket) {}
+    };
+
+    struct CachedSocket final : public Private::SocketBase
+    {
+        std::size_t read(void * buf, const std::size_t size) {
+            uint32 s = (uint32)size, r = 0;
+            if (bufSize) {
+                std::size_t len = std::min(bufSize, size);
+                memcpy(buf, buffer, len);
+                buffer += len;
+                bufSize -= len;
+                if (bufSize) return len;
+                s = size - len;
+                r += len;
+                buf = (uint8*)buf + len;
+            }
+            return socket->recv((char*)buf, s).getCount() + r;
+        }
+
+        CachedSocket(Network::BaseSocket & socket, const uint8 * buffer = 0, const std::size_t size = 0) : Private::SocketBase(socket), buffer(buffer), bufSize(size) {}
+        const uint8 * buffer;
+        std::size_t  bufSize;
     };
 
     /** A chunk based output stream, following HTTP/1.1 RFC standard */
@@ -287,7 +320,7 @@ namespace Streams
 
             // Try to read as much as possible from the buffer here
             toRead = min(size - p, remChunkSize);
-            s = socketStream.read(&buf[p], min(size - p, remChunkSize));
+            s = socketStream.read(&buf[p], toRead);
             if (s == 0) return 0; // Error here
 
             if (s == remChunkSize)
@@ -299,9 +332,9 @@ namespace Streams
             return s+p;
         }
 
-        ChunkedInput(Network::BaseSocket & socket) : socketStream(socket), remChunkSize(0) {}
+        ChunkedInput(Network::BaseSocket & socket, const uint8 * buffer, const uint32 size) : socketStream(socket, buffer, (std::size_t)size), remChunkSize(0) {}
     protected:
-        Socket socketStream;
+        CachedSocket socketStream;
         std::size_t remChunkSize;
     };
 

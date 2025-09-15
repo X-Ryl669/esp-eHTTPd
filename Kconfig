@@ -13,12 +13,32 @@ menu "esp-eHTTPd"
         help
             The transcient-vault buffer size (must be a power of 2) per client.
 
-    config ESP_EHTTPD_TLS_ENABLE
+    config ESP_EHTTPD_TLS_SERVER
         bool "Enable TLS server"
         depends on ESP_EHTTPD_ENABLED
         default n
         help
-        You can activate TLS but it burns space in memory and flash.
+        You can activate TLS for the server but it burns space in memory and flash.
+
+    config ESP_EHTTPD_TLS_CLIENT
+        bool "Enable TLS client"
+        depends on ESP_EHTTPD_ENABLED
+        default n
+        help
+        You can activate TLS for the client but it burns space in memory and flash.
+
+    config ESP_EHTTPD_CLIENT_ENABLED
+        bool "Enable the eHTTPd client component"
+        default y
+        help
+            This enables the eHTTPd client component (a HTTP client reusing common code with the server).
+
+    config ESP_EHTTPD_MINIMIZE_STACK_SIZE
+        bool "Minimize stack usage but increase binary size"
+        depends on ESP_EHTTPD_ENABLED
+        default y
+        help
+            Minimize the stack usage by directly calling the network code instead of computing a larger buffer and a single send.
 
     config ESP_EHTTPD_MAX_SUPPORT
         bool "Enable max compatibility support for HTTP standard"

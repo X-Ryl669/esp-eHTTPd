@@ -12,6 +12,8 @@ namespace Network
         Success = 0,                //!< No error, operation succeeded
         SocketCreation,             //!< Socket creation error
         SocketOption,               //!< Error while changing socket options
+        AddressInfo,                //!< Error while fetching the address information for a name
+        Connect,                    //!< Error while connecting
         Bind,                       //!< Error while binding the socket
         Listen,                     //!< Error while listening the socket
         Select,                     //!< Error while selecting the socket
@@ -26,6 +28,7 @@ namespace Network
         SSLRandom,                  //!< SSL random number generator failed
         SSLSetup,                   //!< Error while setting up SSL
         SSLHandshake,               //!< SSL handshaking error
+        SSLHostname,                //!< SSL hostname error
         BadSocketType,              //!< Bad socket type
         Timeout,                    //!< The operation timed out
         AllocationFailure,          //!< An allocation failed or misbehaved

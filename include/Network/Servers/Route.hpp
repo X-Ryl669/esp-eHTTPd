@@ -345,6 +345,8 @@ namespace Network::Servers::HTTP
                         closeClient(client, Code::BadRequest);
                         continue;
                     }
+                    // Check if the client remotely closed meanwhile
+                    if (!ret.getCount()) { client->closed(); pool.remove(client->socket); break; }
                     client->recvBuffer.stored(ret.getCount());
 
                     // Then parse the client code here at best as we can

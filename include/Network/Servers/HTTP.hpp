@@ -3,7 +3,7 @@
 
 
 // We need headers array too
-#include "HeadersArray.hpp"
+#include "Network/Common/HTTPMessage.hpp"
 // We need the socket code too for clients and server
 #include "Network/Socket.hpp"
 // We need intToStr
@@ -27,6 +27,9 @@
 
 namespace Network::Servers::HTTP
 {
+    using namespace Protocol::HTTP;
+    using namespace Network::Common::HTTP;
+
 #if UseTLSServer == 1
     typedef MBTLSSocket Socket;
 #else
@@ -34,7 +37,6 @@ namespace Network::Servers::HTTP
 #endif
 
     static constexpr const char HTTPAnswer[] = "HTTP/1.1 ";
-    static constexpr const char EOM[] = "\r\n\r\n";
     static constexpr const char BadRequestAnswer[] = "HTTP/1.1 400 Bad request\r\n\r\n";
     static constexpr const char EntityTooLargeAnswer[] = "HTTP/1.1 413 Entity too large\r\n\r\n";
     static constexpr const char InternalServerErrorAnswer[] = "HTTP/1.1 500 Internal server error\r\n\r\n";
@@ -174,17 +176,7 @@ namespace Network::Servers::HTTP
             socket.send(EOM, 2);
             return true;
         }
-        bool sendSize(std::size_t length)
-        {
-            static const char hdr[] = { ':' };
-            char buffer[sizeof("18446744073709551615")] = { };
-            socket.send(Refl::toString(Headers::ContentLength), strlen(Refl::toString(Headers::ContentLength)));
-            socket.send(hdr, 1);
-            intToStr((int)length, buffer, 10);
-            socket.send(buffer, strlen(buffer));
-            socket.send(EOM, strlen(EOM));
-            return true;
-        }
+        bool sendSize(std::size_t length) { return Common::HTTP::sendSize(socket, length); }
         bool reply(Code statusCode, const ROString & msg, bool close = false);
         bool reply(Code statusCode);
 
@@ -279,7 +271,7 @@ namespace Network::Servers::HTTP
         }
 
         bool parse() {
-            timeToLive = 255; 
+            timeToLive = 255;
             ROString buffer = recvBuffer.getView<ROString>();
             switch (parsingStatus)
             {
@@ -340,20 +332,21 @@ namespace Network::Servers::HTTP
         ROString getRequestedPath() const { return reqLine.URI.onlyPath(); }
         /** Check if the client is valid */
         bool isValid() const { return socket.isValid(); }
-        /** Decrease time to live (and close the socket if required) 
+        /** Decrease time to live (and close the socket if required)
             @return true if closed */
         bool tickTimeToLive() {
             if (!timeToLive) return false;
-            if (--timeToLive == 0) 
+            if (--timeToLive == 0)
             {
-                reset(); 
+                reset();
                 return true;
             }
             return false;
         }
         /** Socket was accepted */
         void accepted() { timeToLive = 255; }
-
+        /** Socket was remotely closed */
+        void closed() { timeToLive = 0; reset(); }
 
     protected:
         /** Reset this client state and buffer. This is called from the server's accept method before actually using the client */
@@ -380,13 +373,8 @@ namespace Network::Servers::HTTP
         @param getContentFunc   A content function that returns a stream that can be used by the client to send the answer. If not provided, defaults to a simple string
         @param answerHeaders    A list of headers you are expecting to answer */
     template< typename Child, Headers ... answerHeaders>
-    struct ClientAnswer
+    struct ClientAnswer : public CommonHeader<ClientAnswer<Child, answerHeaders...>, Socket, answerHeaders...>
     {
-        // Construct the answer header array
-        typedef typename ToAnswerHeader<answerHeaders...>::Type ExpectedHeaderArray;
-        ExpectedHeaderArray headers;
-        /** The reply status code to use */
-        Code                replyCode;
         Child * c() { return static_cast<Child*>(this); }
 
         auto getInputStream(Socket & socket) {
@@ -394,21 +382,15 @@ namespace Network::Servers::HTTP
                 return c()->getInputStream(socket);
             else return nullptr;
         }
-        void setCode(Code code) { this->replyCode = code; }
-        Code getCode() const { return this->replyCode; }
-
-        template <Headers h, typename Value>
-        void setHeaderIfUnset(Value && v) { headers.template setHeaderIfUnset<h>(std::forward<Value>(v)); }
-        template <Headers h, typename Value>
-        void setHeader(Value && v) { headers.template getHeader<h>().setValue(std::forward<Value>(v)); }
-        template <Headers h>
-        bool hasValidHeader() const { return headers.template hasValidHeader<h>(); }
 
         bool sendHeaders(Client & client)
         {
+#if MinimizeStackSize == 1
+            return ClientAnswer::CommonHeader::sendHeaders(client.socket);
+#else
             Container::TrackedBuffer buffer { client.recvBuffer.getTail(), client.recvBuffer.freeSize() };
-            if (!headers.sendHeaders(buffer)) return false;
-            return client.socket.send(buffer.buffer, buffer.used) == buffer.used;
+            return ClientAnswer::CommonHeader::sendHeaders(client.socket, buffer);
+#endif
         }
 
         bool sendContent(Client & client, std::size_t & totalSize) {
@@ -417,7 +399,7 @@ namespace Network::Servers::HTTP
                 return c()->sendContent(client, totalSize);
             else return true;
         }
-        ClientAnswer(Code code = Code::Invalid) : replyCode(code) {}
+        ClientAnswer(Code code = Code::Invalid) : ClientAnswer::CommonHeader(code) {}
     };
 
 
@@ -526,27 +508,6 @@ namespace Network::Servers::HTTP
     template <typename InputStream, Headers ... answerHeaders>
     struct FileAnswer : public ClientAnswer<FileAnswer<InputStream, answerHeaders...>, Headers::ContentType, answerHeaders...>
     {
-        /** Get the expected MIME type from the given file extension */
-        constexpr static MIMEType getMIMEFromExtension(const ROString ext) {
-            using namespace CompileTime;
-            MIMEType mimeType = MIMEType::application_octetStream;
-            switch(constHash(ext.getData(), ext.getLength()))
-            {
-            case "html"_hash: case "htm"_hash: mimeType = MIMEType::text_html; break;
-            case "css"_hash:                   mimeType = MIMEType::text_css; break;
-            case "js"_hash:                    mimeType = MIMEType::application_javascript; break;
-            case "png"_hash:                   mimeType = MIMEType::image_png; break;
-            case "jpg"_hash: case "jpeg"_hash: mimeType = MIMEType::image_jpeg; break;
-            case "gif"_hash:                   mimeType = MIMEType::image_gif; break;
-            case "svg"_hash:                   mimeType = MIMEType::image_svg__xml; break;
-            case "webp"_hash:                  mimeType = MIMEType::image_webp; break;
-            case "xml"_hash:                   mimeType = MIMEType::application_xml; break;
-            case "txt"_hash:                   mimeType = MIMEType::text_plain; break;
-            default: break;
-            }
-            return mimeType;
-        }
-
         InputStream & getInputStream(Socket &) { return stream; }
 
         FileAnswer(const char* path) : FileAnswer::ClientAnswer(Code::NotFound), stream(path)
