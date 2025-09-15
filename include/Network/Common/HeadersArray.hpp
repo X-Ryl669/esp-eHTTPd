@@ -1,13 +1,13 @@
 #ifndef hpp_HeadersArray_hpp
 #define hpp_HeadersArray_hpp
 
-// We need HTTP parsers here
-#include "Parser.hpp"
+// We need methods and request line parsing
+#include "Protocol/HTTP/RequestLine.hpp"
 // We need compile time vectors here to cast some magical spells on types
 #include "Container/CTVector.hpp"
 #include "Container/RingBuffer.hpp"
 
-namespace Network::Servers::HTTP
+namespace Network::Common::HTTP
 {
     using namespace Protocol::HTTP;
 
@@ -241,13 +241,21 @@ namespace Network::Servers::HTTP
             return false;
         }
 
-
+#if MinimizeStackSize == 1
+        bool sendHeaders(BaseSocket & socket)
+        {
+            return [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
+                return (std::get<Is>(headers).send(socket) && ...);
+            }(std::make_index_sequence<sizeof...(Header)>{});
+        }
+#else
         bool sendHeaders(Container::TrackedBuffer & buffer)
         {
             return [&]<std::size_t... Is>(std::index_sequence<Is...>)  {
                 return (std::get<Is>(headers).write(buffer) && ...);
             }(std::make_index_sequence<sizeof...(Header)>{});
         }
+#endif
     };
 
     /** Convert the list of headers you're expecting to the matching HeadersArray the library is using */

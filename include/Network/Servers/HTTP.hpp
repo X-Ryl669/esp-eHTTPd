@@ -348,6 +348,7 @@ namespace Network::Servers::HTTP
         /** Socket was remotely closed */
         void closed() { timeToLive = 0; reset(); }
 
+
     protected:
         /** Reset this client state and buffer. This is called from the server's accept method before actually using the client */
         void reset() {
