@@ -330,8 +330,8 @@ namespace Network::Servers::HTTP
                 while ((socket = pool.getReadableSocket(1))) // Start from 1 since socket 0 if for the server
                 {
                     // Got a client for a socket, so need to fill the client buffer and let it progress parsing
-                    Client * client = container_of(socket, Client, socket);
-                    
+                    Client * client = (Client*)(socket); // The address of the first member of a struct is the same as the struct itself //container_of(socket, ClientBase, socket));
+
                     // Check if we can fill the receive buffer first
                     uint32 availableLength = client->recvBuffer.freeSize();
                     if (!availableLength)
