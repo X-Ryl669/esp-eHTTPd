@@ -244,6 +244,8 @@ namespace Protocol::HTTP
             val = val.trimRight(' ');
             return parsed.parseFrom(tmp);
         }
+        static RequestHeader<h> createFrom(ROString value) { RequestHeader<h> hdr{}; hdr.parsed.parseFrom(value); return hdr; }
+
         HeaderMap::ValueBase * getPersistValue() {
             if constexpr(std::is_base_of<PersistantTag, std::decay_t<decltype(parsed)>>::value) {
                 return &parsed;

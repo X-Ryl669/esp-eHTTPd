@@ -32,21 +32,63 @@ namespace Network::Clients::HTTP
     using namespace Protocol::HTTP;
     using namespace Network::Common::HTTP;
 
+    template <typename Child, Headers ... headersInterestedIn>
+    struct EventCallback
+    {
+        static constexpr std::array<Headers, sizeof...(headersInterestedIn)> HeadersList = { headersInterestedIn... };
+        /** A useful check-me method to quickly abort parsing if we aren't interested in that header */
+        bool isInterestedIn(Headers h) const { return ((h == headersInterestedIn) || ...); }
+        /** A useful check-me method to quickly abort parsing if we aren't interested in that header */
+        bool isInterestedIn(ROString header) const { return ((header == Refl::toString(headersInterestedIn)) || ...); }
+        /** To avoid having an large number of virtual method, the following method generic.
+            You can build a RequestHeader<h> and call createFrom(rawValue) to get a usable value here like this:
+            @code
+                switch(h)
+                {
+                case Headers::ContentLength: {
+                    auto hdr = RequestHeader<Headers::ContentLength>::createFrom(value);
+                    printf("Content length: %u", hdr.getValueElement(0));
+                    break;
+                    }
+                [...]
+                }
+            @endcode */
+        void headerReceived(Headers h, ROString value) { if constexpr(requires{ Child::headerReceived; }) static_cast<Child*>(this)->headerReceived(h, value); }
+        /** Called with the received code for the server answer */
+        void serverAnswered(Code code) { if constexpr(requires{ Child::serverAnswered; }) static_cast<Child*>(this)->serverAnswered(code); }
+        /** Called when there is data for this answer.
+            You don't need to decode the input data (transfer encoding or inflating / decompressing), it's already done for you in the given stream.
+            @sa BaseEventCallback for a simply implementation of this */
+        template <typename InStream>
+        bool dataReceived(InStream & stream, std::size_t totalLength = 0) { if constexpr(requires{ Child::dataReceived; }) return static_cast<Child*>(this)->dataReceived(stream, totalLength); else return true; }
+    };
+
+
     template <typename OutStream>
+    struct BasicEventCallback : public EventCallback< BasicEventCallback<OutStream> >
+    {
+        OutStream & outStream;
+
+        template <typename InStream>
+        bool dataReceived(InStream & stream, std::size_t totalLength = (std::size_t)-1) { return (int64)Streams::copy(stream, outStream, totalLength) >= (int64)totalLength; }
+        BasicEventCallback(OutStream & stream) : outStream(stream) {}
+    };
+
+    template <typename Callback>
     struct Request
     {
         Method method;
         ROString url;
         ROString additionalHeaders;
-        OutStream & outStream;
+        Callback callback;
 
-        Request(OutStream & stream, Method method, ROString url, ROString additionalHeaders = "") : outStream(stream), method(method), url(url), additionalHeaders(additionalHeaders) {}
+        Request(auto & callbackArg, Method method, ROString url, ROString additionalHeaders = "") : callback(callbackArg), method(method), url(url), additionalHeaders(additionalHeaders) {}
     };
     // Deduction guide to avoid specifying the output stream type
     template <typename OutStream> Request(OutStream &, Method, ROString, ROString = "") -> Request<OutStream>;
 
-    template <typename InStream, typename OutStream>
-    struct RequestWithTypedStream : public Request<OutStream>
+    template <typename InStream, typename Request>
+    struct RequestWithTypedStream : public Request
     {
         auto getInputStream(BaseSocket & socket) { return inStream; }
         const char* getStreamType(BaseSocket &)  { return Refl::toString(mime); }
@@ -58,8 +100,8 @@ namespace Network::Clients::HTTP
         RequestWithTypedStream(StreamArg arg, MIMEType mime, Args && ... args) : RequestWithTypedStream::Request(std::forward<Args>(args)...), inStream(arg), mime(mime) {}
     };
 
-    template <typename Stream, typename OutStream>
-    struct RequestWithStream : public Request<OutStream>
+    template <typename Stream, typename Request>
+    struct RequestWithStream : public Request
     {
         auto getInputStream(BaseSocket & socket) { return inStream; }
 
@@ -292,7 +334,10 @@ namespace Network::Clients::HTTP
                     int code = _code;
                     // Save server code now
                     if (code < 100 || code > 599) return Code::UnsupportedHTTPVersion;
+
                     serverAnswer = (Code)code;
+                    request.callback.serverAnswered(serverAnswer);
+
                     buffer.splitFrom("\r\n");
                     status = RecvHeaders;
                 }
@@ -319,6 +364,10 @@ namespace Network::Clients::HTTP
 
                         if (GenericHeaderParser::parseValue(headerLine, value) != ParsingError::MoreData)
                             return Code::UnsupportedHTTPVersion;
+
+                        if (request.callback.isInterestedIn(header)) {
+                            request.callback.headerReceived(Refl::fromString<Headers>(header).orElse(Headers::Invalid), value);
+                        }
 
                         // Shortcut to avoid having to save the parsed headers in the vault, all other headers are converted to the expected value and don't need specific saving
                         if (header == "Location") {
@@ -355,7 +404,7 @@ namespace Network::Clients::HTTP
                         size_t totalLen = (size_t)contentLength.getValueElement(0);
                         // Write any pending data first
                         Streams::CachedSocket inStream(*_socket, recvBuffer.getHead(), recvBuffer.getSize());
-                        if (Streams::copy(inStream, request.outStream, totalLen) != totalLen)
+                        if (!request.callback.dataReceived(inStream, totalLen))
                             return Code::ClientRequestError;
                     }
                     else {
@@ -365,7 +414,8 @@ namespace Network::Clients::HTTP
                             return Code::ClientRequestError; // Combination not supported (but very rare indeed)
                         // Write chunked while decoded
                         Streams::ChunkedInput inStream(*_socket, recvBuffer.getHead(), recvBuffer.getSize());
-                        Streams::copy(inStream, request.outStream);
+                        if (!request.callback.dataReceived(inStream))
+                            return Code::ClientRequestError;
                     }
                     // Ok, done now
                     return serverAnswer;
