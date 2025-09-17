@@ -37,13 +37,13 @@ namespace Network::Clients::HTTP
     {
         static constexpr std::array<Headers, sizeof...(headersInterestedIn)> HeadersList = { headersInterestedIn... };
         /** A useful check-me method to quickly abort parsing if we aren't interested in that header */
-        bool isInterestedIn(Headers h) const { return ((h == headersInterestedIn) || ...); }
+        bool isInterestedIn(Headers h) const { if constexpr(requires{ Child::isInterestedIn(h); }) return static_cast<Child*>(this)->isInterestedIn(h); return ((h == headersInterestedIn) || ...); }
         /** A useful check-me method to quickly abort parsing if we aren't interested in that header */
-        bool isInterestedIn(ROString header) const { return ((header == Refl::toString(headersInterestedIn)) || ...); }
+        bool isInterestedIn(ROString header) const { if constexpr(requires{ Child::isInterestedIn(header); }) return static_cast<Child*>(this)->isInterestedIn(header); else return ((header == Refl::toString(headersInterestedIn)) || ...); }
         /** To avoid having an large number of virtual method, the following method generic.
             You can build a RequestHeader<h> and call createFrom(rawValue) to get a usable value here like this:
             @code
-                switch(h)
+                switch(Refl::fromString<Headers>(header).orElse(Headers::Invalid))
                 {
                 case Headers::ContentLength: {
                     auto hdr = RequestHeader<Headers::ContentLength>::createFrom(value);
@@ -53,7 +53,7 @@ namespace Network::Clients::HTTP
                 [...]
                 }
             @endcode */
-        void headerReceived(Headers h, ROString value) { if constexpr(requires{ Child::headerReceived; }) static_cast<Child*>(this)->headerReceived(h, value); }
+        void headerReceived(ROString header, ROString value) { if constexpr(requires{ Child::headerReceived; }) static_cast<Child*>(this)->headerReceived(header, value); }
         /** Called with the received code for the server answer */
         void serverAnswered(Code code) { if constexpr(requires{ Child::serverAnswered; }) static_cast<Child*>(this)->serverAnswered(code); }
         /** Called when there is data for this answer.
@@ -77,12 +77,12 @@ namespace Network::Clients::HTTP
     template <typename Callback>
     struct Request
     {
-        Method method;
-        ROString url;
-        ROString additionalHeaders;
-        Callback callback;
+        Callback    callback;
+        Method      method;
+        ROString    url;
+        ROString    additionalHeaders;
 
-        Request(auto & callbackArg, Method method, ROString url, ROString additionalHeaders = "") : callback(callbackArg), method(method), url(url), additionalHeaders(additionalHeaders) {}
+        Request(auto && callbackArg, Method method, ROString url, ROString additionalHeaders = "") : callback(std::forward<decltype(callbackArg)>(callbackArg)), method(method), url(url), additionalHeaders(additionalHeaders) {}
     };
     // Deduction guide to avoid specifying the output stream type
     template <typename OutStream> Request(OutStream &, Method, ROString, ROString = "") -> Request<OutStream>;
@@ -136,8 +136,8 @@ namespace Network::Clients::HTTP
         SocketDumper(BaseSocket & socket) : socket(socket) {}
 
         template <typename ... Args> inline auto connect(Args && ... args) { auto r = socket.connect(std::forward<Args>(args)...); SLog(Level::Info, "Connect returned: %d", (int)r); return r; }
-        inline auto send(const char * b, const uint32 l)                   { auto r = socket.send(b, l); SLog(Level::Info, "Send returned: %d/%u", (int)r, l); return r; }
-        inline auto recv(char * b, const uint32 l, const uint32 m = 0)     { auto r = socket.recv(b, l, m); SLog(Level::Info, "Recv returned: %d/%u", (int)r, l); return r; }
+        inline auto send(const char * b, const uint32 l)                   { auto r = socket.send(b, l); SLog(Level::Info, "Send returned: %d/%u", (int)r, (unsigned)l); return r; }
+        inline auto recv(char * b, const uint32 l, const uint32 m = 0)     { auto r = socket.recv(b, l, m); SLog(Level::Info, "Recv returned: %d/%u", (int)r, (unsigned)l); return r; }
     };
 
     template <> struct SocketDumper<2>
@@ -146,8 +146,8 @@ namespace Network::Clients::HTTP
         SocketDumper(BaseSocket & socket) : socket(socket) {}
 
         template <typename ... Args> auto connect(const char * h, uint16 p, Args && ... args) { auto r = socket.connect(h, p, std::forward<Args>(args)...); SLog(Level::Info, "Connect to %s:%hu returned: %d", h, p, (int)r); return r; }
-        auto send(const char * b, const uint32 l)                                             { auto r = socket.send(b, l); SLog(Level::Info, "Send [%.*s] returned: %d/%u", l, b, (int)r, l); return r; }
-        auto recv(char * b, const uint32 l, const uint32 m = 0)                               { auto r = socket.recv(b, l, m); SLog(Level::Info, "Recv returned: %d/%u [%.*s]", (int)r, l, r.getCount() > 0 ? r.getCount() : 0, b); return r; }
+        auto send(const char * b, const uint32 l)                                             { auto r = socket.send(b, l); SLog(Level::Info, "Send [%.*s] returned: %d/%u", (int)l, b, (int)r, (unsigned)l); return r; }
+        auto recv(char * b, const uint32 l, const uint32 m = 0)                               { auto r = socket.recv(b, l, m); SLog(Level::Info, "Recv returned: %d/%u [%.*s]", (int)r, (unsigned)l, r.getCount() > 0 ? r.getCount() : 0, b); return r; }
     };
 
     /** A native and simple HTTP client library reusing the code of the HTTP server to avoid duplicate in your binary.
@@ -172,7 +172,7 @@ namespace Network::Clients::HTTP
         };
 
         template <int verbosity, typename Request>
-        Code sendRequest(Request & request)
+        static Code sendRequest(Request & request)
         {
             RWString currentURL = request.url;
             int redirectCount = 3;
@@ -197,7 +197,7 @@ namespace Network::Clients::HTTP
         }
 
         template <int verbosity, typename Request>
-        Code sendRequestImpl(Request & request, RWString & currentURL)
+        static Code sendRequestImpl(Request & request, RWString & currentURL)
         {
             // Parse the given URL to check for supported features
             ROString url = currentURL;
@@ -305,7 +305,6 @@ namespace Network::Clients::HTTP
             Container::TranscientVault<ClientBufferSize> recvBuffer;
             ParsingStatus status = ReqLine;
             Code serverAnswer;
-            bool endOfHeaders = false;
 
             // Main loop to receive data
             while(true)
@@ -366,7 +365,7 @@ namespace Network::Clients::HTTP
                             return Code::UnsupportedHTTPVersion;
 
                         if (request.callback.isInterestedIn(header)) {
-                            request.callback.headerReceived(Refl::fromString<Headers>(header).orElse(Headers::Invalid), value);
+                            request.callback.headerReceived(header, value);
                         }
 
                         // Shortcut to avoid having to save the parsed headers in the vault, all other headers are converted to the expected value and don't need specific saving
